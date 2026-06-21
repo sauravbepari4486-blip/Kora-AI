@@ -1,5 +1,209 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { useAppStore } from '../store'
+
+// ─── SKETCHPAD COMPONENT ─────────────────────────────────────
+const ROOM_COLORS = {
+  'Living Room': '#9FB88A', 'Kitchen': '#E3A857',
+  'Bedroom': '#8DA9C4', 'Dining Room': '#B98FC9', 'Bathroom': '#6FB3A0'
+}
+const PRIORITY = ['Living Room', 'Kitchen', 'Bedroom', 'Dining Room', 'Bathroom']
+
+function buildCells(targetCount, W0, D0) {
+  let cells = [{ x: 0, y: 0, w: W0, h: D0 }]
+  let guard = 0
+  while (cells.length < targetCount && guard < 300) {
+    guard++
+    cells.sort((a, b) => (b.w * b.h) - (a.w * a.h))
+    const cell = cells.shift()
+    let vertical = cell.w >= cell.h
+    if (Math.random() < 0.18) vertical = !vertical
+    const ratio = 0.38 + Math.random() * 0.24
+    if (vertical) {
+      const w1 = cell.w * ratio
+      cells.push({ x: cell.x, y: cell.y, w: w1, h: cell.h })
+      cells.push({ x: cell.x + w1, y: cell.y, w: cell.w - w1, h: cell.h })
+    } else {
+      const h1 = cell.h * ratio
+      cells.push({ x: cell.x, y: cell.y, w: cell.w, h: h1 })
+      cells.push({ x: cell.x, y: cell.y + h1, w: cell.w, h: cell.h - h1 })
+    }
+  }
+  return cells
+}
+
+function fmt(n) { return Math.round(n).toLocaleString('en-US') }
+
+function FloorPlanSketchpad() {
+  const [counts, setCounts] = useState({ Bedroom: 2, Bathroom: 1, Kitchen: 1, 'Living Room': 1, 'Dining Room': 0 })
+  const [totalArea, setTotalArea] = useState(1400)
+  const [viewStyle, setViewStyle] = useState('blueprint')
+  const [layout, setLayout] = useState(null)
+  const [stats, setStats] = useState({ area: 0, rooms: 0, dims: '' })
+  const svgRef = useRef(null)
+
+  const generateLayout = useCallback(() => {
+    let list = []
+    PRIORITY.forEach(type => { for (let i = 0; i < (counts[type] || 0); i++) list.push(type) })
+    if (list.length === 0) list = ['Living Room']
+    const n = list.length
+    const aspect = 1.15 + Math.random() * 0.55
+    const W0 = Math.sqrt(aspect), D0 = 1 / W0
+    let cells = buildCells(n, W0, D0)
+    cells.sort((a, b) => (b.w * b.h) - (a.w * a.h))
+    cells.forEach((c, i) => { c.type = list[i] || 'Bedroom' })
+    setLayout({ leaves: cells, W0, D0 })
+  }, [counts])
+
+  useEffect(() => { generateLayout() }, [])
+
+  useEffect(() => {
+    if (!layout || !svgRef.current) return
+    const factor = Math.sqrt(totalArea)
+    const realW = layout.W0 * factor, realD = layout.D0 * factor
+    const leaves = layout.leaves.map(c => ({
+      x: c.x * factor, y: c.y * factor, w: c.w * factor, h: c.h * factor,
+      type: c.type, area: c.w * c.h * totalArea
+    }))
+
+    const margin = 64, availW = 640 - margin * 2, availH = 460 - margin * 2 - 24
+    const scale = Math.min(availW / realW, availH / realD)
+    const offX = (640 - realW * scale) / 2, offY = (460 - realD * scale) / 2 + 8
+    const px = x => offX + x * scale, py = y => offY + y * scale
+
+    let s = ''
+    if (viewStyle === 'isometric') {
+      s = renderIso(realW, realD, leaves)
+    } else {
+      const filled = viewStyle === 'filled'
+      s = `<rect x="0" y="0" width="640" height="460" fill="${filled ? '#1a2a3a' : '#0a1628'}"/>`
+      if (!filled) {
+        s += `<defs><pattern id="grid" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="rgba(49,130,206,0.1)" stroke-width="1"/></pattern></defs>`
+        s += `<rect x="0" y="0" width="640" height="460" fill="url(#grid)"/>`
+      }
+      leaves.forEach(l => {
+        const x1 = px(l.x), y1 = py(l.y), w = l.w * scale, h = l.h * scale
+        const fill = filled ? ROOM_COLORS[l.type] + 'cc' : 'rgba(49,130,206,0.08)'
+        const stroke = filled ? '#e2e8f0' : '#63b3ed'
+        s += `<rect x="${x1}" y="${y1}" width="${w}" height="${h}" fill="${fill}" stroke="${stroke}" stroke-width="${filled ? 1.5 : 1.25}"/>`
+        s += `<text x="${x1 + w / 2}" y="${y1 + h / 2 - 5}" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="11" font-weight="600" fill="${filled ? '#fff' : '#90cdf4'}">${l.type}</text>`
+        s += `<text x="${x1 + w / 2}" y="${y1 + h / 2 + 10}" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="9" fill="${filled ? '#e2e8f0' : '#63b3ed'}">${fmt(l.area)} sq ft</text>`
+      })
+      s += `<rect x="${offX}" y="${offY}" width="${realW * scale}" height="${realD * scale}" fill="none" stroke="#f6ad55" stroke-width="2.5"/>`
+      s += `<text x="${offX + realW * scale / 2}" y="${offY - 8}" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10" fill="#f6ad55">${fmt(realW)}' × ${fmt(realD)}'</text>`
+      s += `<text x="610" y="24" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="12" font-weight="bold" fill="#f6ad55">N↑</text>`
+    }
+    svgRef.current.innerHTML = s
+    setStats({ area: fmt(totalArea), rooms: leaves.length, dims: `${fmt(realW)}' × ${fmt(realD)}'` })
+  }, [layout, totalArea, viewStyle])
+
+  function renderIso(W, D, leaves) {
+    const h = Math.min(W, D) * 0.32
+    const isoRaw = (x, y, z) => {
+      const a = Math.PI / 6
+      return { x: (x - y) * Math.cos(a), y: (x + y) * Math.sin(a) - z }
+    }
+    const outer = [[0,0,0],[W,0,0],[W,D,0],[0,D,0],[0,0,h],[W,0,h],[W,D,h],[0,D,h]]
+    const allPts = outer.map(p => isoRaw(p[0], p[1], p[2]))
+    const xs = allPts.map(p => p.x), ys = allPts.map(p => p.y)
+    const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys)
+    const scale = Math.min(580 / (maxX - minX), 400 / (maxY - minY)) * 0.88
+    const offX = 320 - scale * (minX + maxX) / 2, offY = 250 - scale * (minY + maxY) / 2
+    const P = (x, y, z) => { const r = isoRaw(x, y, z); return [offX + r.x * scale, offY + r.y * scale] }
+    const poly = arr => arr.map(p => p.join(',')).join(' ')
+    let s = `<rect x="0" y="0" width="640" height="460" fill="#0a1628"/>`
+    s += `<polygon points="${poly([P(0,0,0),P(W,0,0),P(W,D,0),P(0,D,0)])}" fill="rgba(49,130,206,0.05)" stroke="#334e68" stroke-width="1.5"/>`
+    leaves.forEach(l => {
+      const x1=l.x,y1=l.y,x2=l.x+l.w,y2=l.y+l.h
+      s += `<polygon points="${poly([P(x1,y1,0),P(x2,y1,0),P(x2,y2,0),P(x1,y2,0)])}" fill="${ROOM_COLORS[l.type]}99" stroke="#e2e8f0" stroke-width="1"/>`
+      const [lx,ly] = P(l.x+l.w/2, l.y+l.h/2, 1)
+      s += `<text x="${lx}" y="${ly}" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10" font-weight="700" fill="#fff">${l.type}</text>`
+    })
+    s += `<polygon points="${poly([P(W,0,0),P(W,D,0),P(W,D,h),P(W,0,h)])}" fill="rgba(36,59,83,0.9)" stroke="#486581" stroke-width="1.5"/>`
+    s += `<polygon points="${poly([P(0,D,0),P(W,D,0),P(W,D,h),P(0,D,h)])}" fill="rgba(16,42,67,0.9)" stroke="#486581" stroke-width="1.5"/>`
+    s += `<polyline points="${poly([P(0,0,h),P(W,0,h),P(W,D,h),P(0,D,h),P(0,0,h)])}" fill="none" stroke="#63b3ed" stroke-width="1.5"/>`
+    return s
+  }
+
+  const adjust = (type, delta) => {
+    setCounts(c => ({ ...c, [type]: Math.max(0, Math.min(9, (c[type] || 0) + delta)) }))
+  }
+
+  useEffect(() => { generateLayout() }, [counts])
+
+  const ROOMS = [
+    { key: 'Bedroom', label: 'Bedroom' },
+    { key: 'Bathroom', label: 'Bathroom' },
+    { key: 'Kitchen', label: 'Kitchen' },
+    { key: 'Living Room', label: 'Living Room' },
+    { key: 'Dining Room', label: 'Dining Room' },
+  ]
+
+  return (
+    <div className="glow-border rounded-xl bg-steel-900/60 p-5 space-y-4">
+      <h2 className="text-sm font-medium text-steel-300 mono">⬡ Interactive Sketchpad</h2>
+      <p className="text-steel-500 text-xs mono">Room count adjust করো → Generate চাপো → Blueprint/Filled/Isometric view</p>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        {/* Left panel */}
+        <div className="space-y-2">
+          <p className="text-steel-500 text-xs mono mb-2">ROOM PROGRAM</p>
+          {ROOMS.map(({ key, label }) => (
+            <div key={key} className="flex items-center justify-between py-1.5 border-b border-steel-700/30">
+              <div className="flex items-center gap-2">
+                <div className="w-2.5 h-2.5 rounded-sm" style={{ background: ROOM_COLORS[key] }} />
+                <span className="text-steel-300 text-xs mono">{label}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => adjust(key, -1)}
+                  className="w-5 h-5 rounded-full border border-steel-600/50 text-steel-400 hover:border-blue-400 hover:text-blue-300 text-xs flex items-center justify-center transition-all">−</button>
+                <span className="text-blue-300 text-xs mono w-3 text-center">{counts[key]}</span>
+                <button onClick={() => adjust(key, 1)}
+                  className="w-5 h-5 rounded-full border border-steel-600/50 text-steel-400 hover:border-blue-400 hover:text-blue-300 text-xs flex items-center justify-center transition-all">+</button>
+              </div>
+            </div>
+          ))}
+
+          <div className="pt-2">
+            <div className="flex justify-between mb-1">
+              <span className="text-steel-400 text-xs mono">Gross Area</span>
+              <span className="text-amber-400 text-xs mono">{fmt(totalArea)} sq ft</span>
+            </div>
+            <input type="range" min="400" max="4000" step="50" value={totalArea}
+              onChange={e => setTotalArea(parseInt(e.target.value))}
+              className="w-full accent-amber-500 h-1 cursor-pointer" />
+          </div>
+
+          <button onClick={generateLayout}
+            className="w-full py-2 rounded-lg bg-amber-600/20 border border-amber-500/40 text-amber-300 hover:bg-amber-600/30 text-xs mono font-medium transition-all mt-2">
+            ⟳ Generate New Layout
+          </button>
+        </div>
+
+        {/* Right canvas */}
+        <div className="sm:col-span-2 space-y-2">
+          <div className="flex gap-1">
+            {[['blueprint','Blueprint'],['filled','Filled'],['isometric','Isometric']].map(([id, label]) => (
+              <button key={id} onClick={() => setViewStyle(id)}
+                className={`px-3 py-1 rounded-lg text-xs mono border transition-all ${viewStyle === id ? 'bg-blue-600/30 border-blue-500/40 text-blue-300' : 'border-steel-700/40 text-steel-400 hover:border-steel-600'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="rounded-xl overflow-hidden border border-steel-700/40">
+            <svg ref={svgRef} viewBox="0 0 640 460" xmlns="http://www.w3.org/2000/svg" className="w-full" />
+          </div>
+
+          <div className="flex gap-5 px-1">
+            <div><span className="text-white text-sm mono font-medium">{stats.area}</span><p className="text-steel-500 text-xs mono">sq ft</p></div>
+            <div><span className="text-white text-sm mono font-medium">{stats.rooms}</span><p className="text-steel-500 text-xs mono">Rooms</p></div>
+            <div><span className="text-white text-sm mono font-medium">{stats.dims}</span><p className="text-steel-500 text-xs mono">Footprint</p></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 const GROQ_API = 'https://api.groq.com/openai/v1/chat/completions'
 const API_KEY = import.meta.env.VITE_GROQ_KEY
@@ -282,9 +486,12 @@ IMPORTANT: All room x,y,w,h values must fit within plot ${form.plotWidth}×${for
         })
       })
       const data = await resp.json()
+      if (data.error) throw new Error('Invalid API Key — Vercel এ VITE_GROQ_KEY check করো')
       const text = data.choices?.[0]?.message?.content || ''
-      const clean = text.replace(/```json|```/g, '').trim()
-      const parsed = JSON.parse(clean)
+      if (!text) throw new Error('AI response empty. Try again.')
+      const jsonMatch = text.match(/\{[\s\S]*\}/)
+      if (!jsonMatch) throw new Error('AI valid JSON দেয়নি। আবার try করো।')
+      const parsed = JSON.parse(jsonMatch[0])
       setResult(parsed)
     } catch (err) {
       setResult({ error: `Error: ${err.message}` })
@@ -308,6 +515,10 @@ IMPORTANT: All room x,y,w,h values must fit within plot ${form.plotWidth}×${for
         <p className="text-steel-500 text-xs mono">Plot size দাও → Complete building design পাও</p>
       </div>
 
+      {/* Sketchpad */}
+      <FloorPlanSketchpad />
+
+      {/* AI Generator */}
       {/* Input form */}
       <div className="glow-border rounded-xl bg-steel-900/60 p-5 space-y-4">
         <h2 className="text-sm font-medium text-steel-300 mono">Plot & Building Info</h2>
@@ -602,6 +813,212 @@ IMPORTANT: All room x,y,w,h values must fit within plot ${form.plotWidth}×${for
           )}
         </div>
       )}
+
+      {/* Draftboard Sketchpad */}
+      <DraftboardSketchpad />
+    </div>
+  )
+}
+
+// ─── DRAFTBOARD SKETCHPAD ────────────────────────────────────
+function DraftboardSketchpad() {
+  const svgRef = useRef(null)
+  const [counts, setCounts] = useState({ Bedroom: 2, Bathroom: 1, Kitchen: 1, 'Living Room': 1, 'Dining Room': 0 })
+  const [totalArea, setTotalArea] = useState(1400)
+  const [viewStyle, setViewStyle] = useState('blueprint')
+  const [stats, setStats] = useState({ area: '1,400', rooms: 0, dims: '' })
+  const layoutRef = useRef(null)
+
+  const ROOM_COLORS = {
+    'Living Room': '#9FB88A', 'Kitchen': '#E3A857',
+    'Bedroom': '#8DA9C4', 'Dining Room': '#B98FC9', 'Bathroom': '#6FB3A0'
+  }
+  const PRIORITY = ['Living Room', 'Kitchen', 'Bedroom', 'Dining Room', 'Bathroom']
+  const fmt = n => Math.round(n).toLocaleString('en-US')
+
+  const buildCells = (n, W0, D0) => {
+    let cells = [{ x: 0, y: 0, w: W0, h: D0 }]
+    let guard = 0
+    while (cells.length < n && guard < 300) {
+      guard++
+      cells.sort((a, b) => (b.w * b.h) - (a.w * a.h))
+      const cell = cells.shift()
+      let vertical = cell.w >= cell.h
+      if (Math.random() < 0.18) vertical = !vertical
+      const ratio = 0.38 + Math.random() * 0.24
+      if (vertical) {
+        const w1 = cell.w * ratio
+        cells.push({ x: cell.x, y: cell.y, w: w1, h: cell.h })
+        cells.push({ x: cell.x + w1, y: cell.y, w: cell.w - w1, h: cell.h })
+      } else {
+        const h1 = cell.h * ratio
+        cells.push({ x: cell.x, y: cell.y, w: cell.w, h: h1 })
+        cells.push({ x: cell.x, y: cell.y + h1, w: cell.w, h: cell.h - h1 })
+      }
+    }
+    return cells
+  }
+
+  const renderSVG = useCallback((layout, area, style) => {
+    if (!layout || !svgRef.current) return
+    const factor = Math.sqrt(area)
+    const realW = layout.W0 * factor, realD = layout.D0 * factor
+    const leaves = layout.leaves.map(c => ({
+      x: c.x*factor, y: c.y*factor, w: c.w*factor, h: c.h*factor,
+      type: c.type, area: c.w*c.h*area
+    }))
+
+    const isoRaw = (x, y, z) => {
+      const a = Math.PI / 6
+      return { x: (x - y) * Math.cos(a), y: (x + y) * Math.sin(a) - z }
+    }
+
+    let s = ''
+    if (style === 'isometric') {
+      const h = Math.min(realW, realD) * 0.32
+      const outer = [[0,0,0],[realW,0,0],[realW,realD,0],[0,realD,0],[0,0,h],[realW,0,h],[realW,realD,h],[0,realD,h]]
+      const allPts = outer.map(p => isoRaw(p[0], p[1], p[2]))
+      const xs = allPts.map(p => p.x), ys = allPts.map(p => p.y)
+      const minX=Math.min(...xs), maxX=Math.max(...xs), minY=Math.min(...ys), maxY=Math.max(...ys)
+      const sc = Math.min(580/(maxX-minX), 400/(maxY-minY)) * 0.9
+      const ox = 320 - sc*(minX+maxX)/2, oy = 230 - sc*(minY+maxY)/2
+      const P = (x,y,z) => { const r=isoRaw(x,y,z); return [ox+r.x*sc, oy+r.y*sc] }
+      const poly = arr => arr.map(p=>p.join(',')).join(' ')
+      s = '<rect x="0" y="0" width="640" height="460" fill="#0a1628"/>'
+      s += `<polygon points="${poly([P(0,0,0),P(realW,0,0),P(realW,realD,0),P(0,realD,0)])}" fill="rgba(49,130,206,0.1)" stroke="#63b3ed" stroke-width="2"/>`
+      leaves.forEach(l => {
+        const x2=l.x+l.w, y2=l.y+l.h
+        s += `<polygon points="${poly([P(l.x,l.y,0),P(x2,l.y,0),P(x2,y2,0),P(l.x,y2,0)])}" fill="${ROOM_COLORS[l.type]}99" stroke="#63b3ed" stroke-width="1.2"/>`
+        const [lx,ly] = P(l.x+l.w/2, l.y+l.h/2, 2)
+        s += `<text x="${lx}" y="${ly-3}" text-anchor="middle" font-family="monospace" font-size="10" font-weight="700" fill="#e2e8f0">${l.type}</text>`
+        s += `<text x="${lx}" y="${ly+11}" text-anchor="middle" font-family="monospace" font-size="9" fill="#90cdf4">${fmt(l.area)} sq ft</text>`
+      })
+      s += `<polygon points="${poly([P(realW,0,0),P(realW,realD,0),P(realW,realD,h),P(realW,0,h)])}" fill="rgba(36,59,83,0.9)" stroke="#63b3ed" stroke-width="1.5"/>`
+      s += `<polygon points="${poly([P(0,realD,0),P(realW,realD,0),P(realW,realD,h),P(0,realD,h)])}" fill="rgba(43,76,107,0.9)" stroke="#63b3ed" stroke-width="1.5"/>`
+    } else {
+      const margin = 64
+      const sc = Math.min((640-margin*2)/realW, (400-margin*2)/realD)
+      const ox = (640-realW*sc)/2, oy = (460-realD*sc)/2
+      const px = x => ox+x*sc, py = y => oy+y*sc
+      const filled = style === 'filled'
+      s = '<rect x="0" y="0" width="640" height="460" fill="#0a1628"/>'
+      if (!filled) s += '<defs><pattern id="grd" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="rgba(49,130,206,0.12)" stroke-width="1"/></pattern></defs><rect x="0" y="0" width="640" height="460" fill="url(#grd)"/>'
+      leaves.forEach(l => {
+        const x1=px(l.x), y1=py(l.y), w=l.w*sc, h=l.h*sc
+        s += `<rect x="${x1}" y="${y1}" width="${w}" height="${h}" fill="${filled ? ROOM_COLORS[l.type]+'bb' : 'rgba(49,130,206,0.08)'}" stroke="#63b3ed" stroke-width="1.5"/>`
+        s += `<text x="${x1+w/2}" y="${y1+h/2-4}" text-anchor="middle" font-family="monospace" font-size="11" font-weight="600" fill="#e2e8f0">${l.type}</text>`
+        s += `<text x="${x1+w/2}" y="${y1+h/2+11}" text-anchor="middle" font-family="monospace" font-size="9" fill="#90cdf4">${fmt(l.area)} sq ft</text>`
+      })
+      s += `<rect x="${ox}" y="${oy}" width="${realW*sc}" height="${realD*sc}" fill="none" stroke="#f6ad55" stroke-width="2.5"/>`
+      s += `<text x="${ox+realW*sc/2}" y="${oy-10}" text-anchor="middle" font-family="monospace" font-size="10" fill="#90cdf4">${fmt(realW)}'</text>`
+      s += `<text x="${ox-14}" y="${oy+realD*sc/2}" text-anchor="middle" font-family="monospace" font-size="10" fill="#90cdf4" transform="rotate(-90 ${ox-14} ${oy+realD*sc/2})">${fmt(realD)}'</text>`
+      s += `<text x="615" y="28" text-anchor="middle" font-family="monospace" font-size="11" font-weight="700" fill="#f6ad55">N↑</text>`
+    }
+    svgRef.current.innerHTML = s
+    setStats({ area: fmt(area), rooms: leaves.length, dims: `${fmt(realW)}' × ${fmt(realD)}'` })
+  }, [])
+
+  const generateLayout = useCallback((c, a, style) => {
+    const roomList = []
+    PRIORITY.forEach(type => { for (let i=0; i<(c[type]||0); i++) roomList.push(type) })
+    if (!roomList.length) roomList.push('Living Room')
+    const aspect = 1.15 + Math.random()*0.55
+    const W0 = Math.sqrt(aspect), D0 = 1/W0
+    let cells = buildCells(roomList.length, W0, D0)
+    cells.sort((a,b) => (b.w*b.h)-(a.w*a.h))
+    cells.forEach((cell, i) => { cell.type = roomList[i] || 'Bedroom' })
+    const layout = { leaves: cells, W0, D0 }
+    layoutRef.current = layout
+    renderSVG(layout, a, style)
+  }, [renderSVG])
+
+  useEffect(() => { generateLayout(counts, totalArea, viewStyle) }, [])
+
+  const updateCount = (type, delta) => {
+    const nc = { ...counts, [type]: Math.max(0, Math.min(9, (counts[type]||0)+delta)) }
+    setCounts(nc)
+    generateLayout(nc, totalArea, viewStyle)
+  }
+
+  const handleArea = val => {
+    setTotalArea(val)
+    if (layoutRef.current) renderSVG(layoutRef.current, val, viewStyle)
+  }
+
+  const handleStyle = s => {
+    setViewStyle(s)
+    if (layoutRef.current) renderSVG(layoutRef.current, totalArea, s)
+  }
+
+  const ROOM_ROWS = [
+    { type: 'Bedroom', color: '#8DA9C4' },
+    { type: 'Bathroom', color: '#6FB3A0' },
+    { type: 'Kitchen', color: '#E3A857' },
+    { type: 'Living Room', color: '#9FB88A' },
+    { type: 'Dining Room', color: '#B98FC9' },
+  ]
+
+  return (
+    <div className="glow-border rounded-xl bg-steel-900/60 p-5 space-y-4">
+      <div className="flex items-center gap-2">
+        <span className="text-amber-400">◈</span>
+        <h2 className="text-sm font-semibold text-white mono">Manual Sketchpad</h2>
+        <span className="text-steel-500 text-xs mono">— room বাড়িয়ে কমিয়ে instantly দেখো</span>
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="space-y-3">
+          <div className="glow-border rounded-xl p-3 space-y-2">
+            <p className="text-steel-500 text-xs mono mb-2">ROOM PROGRAM</p>
+            {ROOM_ROWS.map(({ type, color }) => (
+              <div key={type} className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-2.5 h-2.5 rounded-sm" style={{ background: color }} />
+                  <span className="text-steel-300 text-xs mono">{type}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => updateCount(type, -1)} className="w-6 h-6 rounded-full border border-steel-600/50 text-steel-300 hover:border-blue-500/50 hover:text-blue-300 flex items-center justify-center transition-all text-sm">−</button>
+                  <span className="text-white text-xs mono w-4 text-center">{counts[type]}</span>
+                  <button onClick={() => updateCount(type, 1)} className="w-6 h-6 rounded-full border border-steel-600/50 text-steel-300 hover:border-blue-500/50 hover:text-blue-300 flex items-center justify-center transition-all text-sm">+</button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="glow-border rounded-xl p-3">
+            <div className="flex justify-between mb-2">
+              <span className="text-steel-500 text-xs mono">Gross Area</span>
+              <span className="text-amber-400 text-xs mono">{totalArea.toLocaleString()} sq ft</span>
+            </div>
+            <input type="range" min="400" max="4000" step="50" value={totalArea}
+              onChange={e => handleArea(parseInt(e.target.value))}
+              className="w-full" style={{ accentColor: '#f6ad55' }} />
+          </div>
+          <button onClick={() => generateLayout(counts, totalArea, viewStyle)}
+            className="w-full py-2.5 rounded-xl border border-amber-500/40 bg-amber-600/20 text-amber-300 hover:bg-amber-600/30 text-xs mono font-medium transition-all">
+            ↻ Generate New Layout
+          </button>
+          <div className="grid grid-cols-3 gap-2">
+            {[['Area', stats.area+' ft²'],['Rooms', stats.rooms],['Dims', stats.dims]].map(([label, val]) => (
+              <div key={label} className="bg-steel-800/40 rounded-lg px-2 py-2 text-center">
+                <p className="text-white text-xs mono font-medium">{val}</p>
+                <p className="text-steel-500 text-xs mono">{label}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="lg:col-span-2 space-y-2">
+          <div className="flex gap-1">
+            {[['blueprint','Blueprint'],['filled','Filled'],['isometric','Isometric']].map(([id, label]) => (
+              <button key={id} onClick={() => handleStyle(id)}
+                className={`px-3 py-1.5 rounded-lg text-xs mono border transition-all ${viewStyle===id ? 'bg-blue-600/30 border-blue-500/40 text-blue-300' : 'border-steel-700/40 text-steel-400 hover:border-steel-600'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="rounded-xl overflow-hidden border border-steel-700/40" style={{ background: '#0a1628' }}>
+            <svg ref={svgRef} viewBox="0 0 640 460" xmlns="http://www.w3.org/2000/svg" className="w-full h-auto" />
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
